@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #fbf9f6;
+  --color-panel: #f3efe9;
+  --color-line: #e2dcd2;
+  --color-ink: #1c1917;
+  --color-muted: #6f665c;
+  --color-accent: #8a4b2a;
+  --color-accent-soft: #f0e2d8;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-paper: #16130f;
+    --color-panel: #1e1a15;
+    --color-line: #2f2921;
+    --color-ink: #ece5db;
+    --color-muted: #9a8f81;
+    --color-accent: #d99a6c;
+    --color-accent-soft: #2c2118;
+  }
+}
+
+html,
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The answer body is prose about a document, so it reads as a document. */
+.prose-lease {
+  font-family: var(--font-serif);
+  font-size: 1.02rem;
+  line-height: 1.7;
+}
+
+.prose-lease p + p {
+  margin-top: 0.85em;
+}
