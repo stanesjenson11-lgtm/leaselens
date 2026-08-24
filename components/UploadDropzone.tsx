@@ -43,8 +43,8 @@ export default function UploadDropzone({ onUploaded }: { onUploaded: () => void 
           void upload(e.dataTransfer.files[0]);
         }}
         disabled={busy}
-        className={`w-full rounded-lg border border-dashed px-3 py-6 text-center text-sm transition ${
-          over ? "border-accent bg-accent-soft" : "border-line hover:border-accent"
+        className={`w-full rounded-xl px-3 py-6 text-center text-sm transition ${
+          over ? "bg-accent-soft text-accent shadow-neu-inset" : "text-muted shadow-neu-inset-sm hover:shadow-neu-inset"
         } disabled:opacity-60`}
       >
         {busy ? "Uploading…" : "Drop a lease PDF, or click to choose"}

@@ -79,7 +79,7 @@ export default function Sidebar() {
                 disabled={d.status !== "ready"}
                 onClick={() => void startChat(d.id)}
                 title={d.error ?? undefined}
-                className="w-full rounded-md px-2 py-1.5 text-left transition hover:bg-paper disabled:opacity-60 disabled:hover:bg-transparent"
+                className="w-full rounded-lg px-2 py-1.5 text-left transition hover:shadow-neu-sm disabled:opacity-60 disabled:hover:shadow-none"
               >
                 <span className="block truncate text-sm">{d.filename}</span>
                 <span className="block text-xs text-muted">
@@ -108,8 +108,8 @@ export default function Sidebar() {
               <li key={c.id}>
                 <Link
                   href={`/chat/${c.id}`}
-                  className={`block truncate rounded-md px-2 py-1.5 text-sm transition ${
-                    active ? "bg-accent-soft text-accent" : "hover:bg-paper"
+                  className={`block truncate rounded-lg px-2 py-1.5 text-sm transition ${
+                    active ? "bg-accent text-accent-ink shadow-neu-sm" : "hover:shadow-neu-sm"
                   }`}
                 >
                   {c.title ?? "New conversation"}

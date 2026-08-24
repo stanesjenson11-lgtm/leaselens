@@ -25,13 +25,13 @@ export function CitationChip({ citation }: { citation: Citation }) {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         title={`${citation.heading ?? "Clause"} · ${pages}`}
-        className="mx-0.5 rounded bg-accent-soft px-1.5 py-0.5 align-super text-[0.7em] font-medium text-accent transition hover:brightness-95"
+        className="mx-0.5 rounded-full bg-accent px-1.5 py-0.5 align-super text-[0.7em] font-semibold text-accent-ink transition hover:brightness-105"
       >
         {citation.id}
       </button>
 
       {open && (
-        <span className="absolute bottom-full left-0 z-20 mb-2 block w-[min(30rem,80vw)] rounded-lg border border-line bg-panel p-4 text-left shadow-lg">
+        <span className="absolute bottom-full left-0 z-20 mb-2 block w-[min(30rem,80vw)] rounded-2xl p-4 text-left shadow-neu">
           <span className="flex items-baseline justify-between gap-4 border-b border-line pb-2">
             <span className="font-sans text-xs font-medium uppercase tracking-wide text-muted">
               {citation.heading ?? "Clause"}
