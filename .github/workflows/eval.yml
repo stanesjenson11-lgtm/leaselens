@@ -1,7 +1,7 @@
 name: eval
 
-# Nightly, not per-push: the free tier's 15 req/min limit makes a full run take
-# a few minutes, and the numbers only move when the prompts, the chunker, or
+# Nightly, not per-push: the free tier's rate limits make a full run take
+# several minutes, and the numbers only move when the prompts, the chunker, or
 # the retrieval change.
 on:
   schedule:
@@ -14,16 +14,24 @@ permissions:
 jobs:
   eval:
     runs-on: ubuntu-latest
+    # Skipped, not failed, until the secrets exist, so the repo doesn't post a
+    # red run every night before it's been given a database.
+    env:
+      READY: ${{ secrets.DATABASE_URL != '' && secrets.GOOGLE_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+        if: env.READY == 'true'
       - uses: actions/setup-node@v4
+        if: env.READY == 'true'
         with:
           node-version: 22
           cache: npm
 
       - run: npm ci
+        if: env.READY == 'true'
 
       - name: Run the golden set
+        if: env.READY == 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
@@ -32,6 +40,7 @@ jobs:
           npm run eval
 
       - uses: actions/upload-artifact@v4
+        if: env.READY == 'true'
         with:
           name: eval-results
           path: eval/results.md
