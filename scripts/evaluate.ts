@@ -4,21 +4,27 @@ import { Type } from "@google/genai";
 import { z } from "zod";
 import "./env";
 import { required } from "./env";
-import { findUserByEmail, listDocuments } from "@/lib/db/queries";
-import { genAI, ANSWER_MODEL } from "@/lib/llm";
+import { findUserByEmail, listChunks, listDocuments } from "@/lib/db/queries";
+import { extractKeyTerms } from "@/lib/ingest/terms";
+import { genAI, ANSWER_MODEL, withRetry } from "@/lib/llm";
 import { answerQuestion } from "@/lib/rag/pipeline";
 import type { Citation } from "@/lib/rag/types";
 
 /**
  * Turns "it seems to work" into four numbers.
  *
- * Run against the seeded demo account (`npm run seed` first). Free-tier rate
- * limits (15 req/min on Flash) mean 24 questions plus one judge call each take
- * a few minutes, not API dollars — that's the point of running on Google AI
- * Studio's free tier. Still nightly, not per-push: it's slow, not cheap.
+ * Run against the seeded demo account (`npm run seed` first). The free tier
+ * allows 5 req/min on Flash, and every case spends an answer and a judge call
+ * there, so a full run takes ten-plus minutes, not API dollars — that's the
+ * point of running on Google AI Studio's free tier. Nightly, not per-push.
  */
 required("DATABASE_URL");
 required("GOOGLE_API_KEY");
+
+// A chat request can't wait out a per-minute quota window; this script can,
+// and a 429 scored as a wrong answer would corrupt every number below.
+process.env.RETRY_429_MAX_S ??= "65";
+const UPSTREAM_TRIES = 3;
 
 const EMAIL = process.argv[2] ?? "demo@leaselens.app";
 
@@ -55,7 +61,7 @@ async function judge(question: string, answer: string, citations: Citation[]) {
     .map((c) => `[${c.id}] ${c.heading ?? "clause"} (p.${c.pageStart})\n${c.text}`)
     .join("\n\n");
 
-  const res = await genAI().models.generateContent({
+  const res = await withRetry(() => genAI().models.generateContent({
     model: ANSWER_MODEL,
     contents: `Question: ${question}\n\nClauses:\n${clauses}\n\nAnswer:\n${answer}`,
     config: {
@@ -64,7 +70,7 @@ async function judge(question: string, answer: string, citations: Citation[]) {
       responseMimeType: "application/json",
       responseSchema: JUDGEMENT_SCHEMA,
     },
-  });
+  }));
 
   try {
     return Judgement.parse(JSON.parse(res.text ?? "")).grounded;
@@ -106,18 +112,28 @@ for (const c of cases) {
   let answer = "";
   let citations: Citation[] = [];
 
-  for await (const event of answerQuestion({
-    userId: user.id,
-    documentId: doc.id,
-    question: c.question,
-    history: [],
-  })) {
-    if (event.type === "citations") citations = event.citations;
-    if (event.type === "done") {
-      answer = event.content;
-      citations = event.citations;
+  // A pipeline error here is the free tier's 503 "high demand" or an exhausted
+  // quota, not a wrong answer. Retry the case after a pause; only a case that
+  // keeps failing is scored as one.
+  for (let attempt = 1; attempt <= UPSTREAM_TRIES; attempt++) {
+    answer = "";
+    citations = [];
+    for await (const event of answerQuestion({
+      userId: user.id,
+      documentId: doc.id,
+      question: c.question,
+      history: [],
+    })) {
+      if (event.type === "citations") citations = event.citations;
+      if (event.type === "done") {
+        answer = event.content;
+        citations = event.citations;
+      }
+      if (event.type === "error") answer = `[pipeline error] ${event.message}`;
     }
-    if (event.type === "error") answer = `[pipeline error] ${event.message}`;
+    if (!answer.startsWith("[pipeline error]") || attempt === UPSTREAM_TRIES) break;
+    console.log(`  upstream error on ${c.id}, retrying in 30s`);
+    await new Promise((r) => setTimeout(r, 30_000));
   }
 
   const cited = [...answer.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
@@ -136,14 +152,59 @@ for (const c of cases) {
     ms: Date.now() - started,
   };
 
+  // A judge that still can't be reached after its retries scores the case
+  // ungrounded rather than throwing away every result gathered so far.
   result.grounded = answer.startsWith("[pipeline error]")
     ? false
-    : await judge(c.question, answer, citations);
+    : await judge(c.question, answer, citations).catch((e) => {
+        console.error(`  judge unreachable for ${c.id}:`, (e as Error).message.slice(0, 120));
+        return false;
+      });
 
   results.push(result);
   console.log(
     `${result.recalled || !c.answerable ? "." : "R"}${result.refused === !c.answerable ? "." : "F"}${result.grounded ? "." : "G"} ${c.id}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Key terms, extracted fresh from the stored chunks: this measures the current
+// prompt and grounding guard, not whatever was saved at upload time. A null
+// expectation means the lease is silent and the field must NOT come back.
+
+const expectedTerms: Record<string, Record<string, string | null>> = JSON.parse(
+  readFileSync(path.join(process.cwd(), "eval/key-terms.json"), "utf8"),
+);
+const termMisses: string[] = [];
+let termHits = 0;
+let termTotal = 0;
+
+for (const [name, fields] of Object.entries(expectedTerms)) {
+  const doc = byName.get(name);
+  if (!doc) throw new Error(`Document ${name} is not seeded for ${EMAIL}`);
+  const chunks = await listChunks(user.id, doc.id);
+  const terms = await extractKeyTerms(chunks).then(
+    (r) => r.terms,
+    (e) => (console.error(`  key terms failed for ${name}:`, (e as Error).message.slice(0, 120)), []),
+  );
+
+  for (const [field, want] of Object.entries(fields)) {
+    termTotal++;
+    const got = terms.find((t) => t.field === field);
+    const w = want?.toLowerCase() ?? "";
+    // Right value AND a page where that text really is.
+    const ok =
+      want === null
+        ? !got
+        : !!got &&
+          got.value.toLowerCase().includes(w) &&
+          chunks.some((c) => c.pageStart === got.page && c.content.toLowerCase().includes(w));
+    if (ok) termHits++;
+    else
+      termMisses.push(
+        `- \`${name}.${field}\`: expected ${want === null ? "nothing" : `"${want}"`}, got ${got ? `"${got.value}" (p.${got.page})` : "nothing"}`,
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +221,7 @@ const rows = [
   ["Citation validity", pct(results.filter((r) => r.citationsValid).length, results.length), "every [n] resolves to a supplied clause"],
   ["Groundedness", pct(results.filter((r) => r.grounded).length, results.length), `LLM-as-judge, ${ANSWER_MODEL}`],
   ["Median latency", `${(median(results.map((r) => r.ms)) / 1000).toFixed(1)}s`, "rewrite → retrieve → rerank → grade → answer"],
+  ["Key-terms accuracy", pct(termHits, termTotal), `${termTotal} fields, incl. ${Object.values(expectedTerms).flatMap(Object.values).filter((v) => v === null).length} the leases are silent on`],
 ];
 
 const report = `# Evaluation
@@ -190,6 +252,10 @@ ${
     .map((r) => `### \`${r.id}\`\n\n**${r.question}**\n\n> ${r.answer.replace(/\n+/g, "\n> ")}`)
     .join("\n\n") || "_None._"
 }
+
+## Key-terms misses
+
+${termMisses.join("\n") || "_None._"}
 `;
 
 writeFileSync(path.join(process.cwd(), "eval/results.md"), report);

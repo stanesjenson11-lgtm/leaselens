@@ -70,6 +70,7 @@ is the only model credential in the app.
 | --- | --- | --- |
 | Rewrite | Gemini 3.1 Flash-Lite | *"what about two of them?"* → a standalone query. Skipped on the first message. |
 | Retrieve | — | pgvector cosine **and** `tsvector` keyword, two SQL statements, fused by **RRF** (k=60) |
+| Gate | — | nearest clause below cosine **0.55**? Not a lease question: decline now, skip the next three calls |
 | Rerank | Gemini 3.1 Flash-Lite | scores the 25 fused candidates against the question, keeps 5 |
 | Grade | Gemini 3.1 Flash-Lite | *do these clauses actually answer it?* If not, widen and retry — **once** |
 | Answer | Gemini 3.7 Flash | streamed over SSE, every claim cited |
@@ -78,6 +79,57 @@ Dense retrieval finds the paraphrase (*"snake"* → *"animals of any kind"*).
 Keyword retrieval finds the defined term that only means something inside this
 lease. Legal prose needs both, and RRF fuses them without pretending cosine
 distance and `ts_rank_cd` are on the same scale.
+
+**The off-topic gate is calibrated, not guessed.** `npm run calibrate` scores
+every golden question against the nearest clause. Lease questions land at
+0.596–0.756, *including* the ones the lease doesn't cover (*"can I keep a
+python?"* is lowest), while off-topic ones (*"capital of France"*, *"recipe for
+biryani"*) top out at 0.503. The threshold sits mid-gap. Questions the lease is
+silent on stay above it on purpose: declining those well needs the pet clause in
+hand, which only the full pipeline has. The number is per-corpus; re-run it
+after changing the embedding model.
+
+### At a glance
+
+On upload, one structured call pulls rent, due date, late fee, deposit, deposit
+return window, term, notice, pets and utilities, each pinned to the clause it
+came from. Valid JSON is not the same as true JSON, so
+[`groundTerms()`](lib/ingest/terms.ts) keeps a term only if **every number in
+it appears in the clause it cites** and most of its words do too. A right-looking
+`$1,850` cited to the deposit clause is dropped: a key-terms card that cites the
+wrong page is worse than one with a gap. Extraction runs in parallel with
+embedding and can't fail an upload.
+
+### Scanned leases
+
+A PDF with no text layer used to be rejected. Now it goes to Gemini as inline
+PDF data and comes back as a verbatim per-page transcript, so page numbers, and
+therefore citations, stay real. The transcript is parsed defensively
+(out-of-range pages dropped, split pages merged), and a cut-off response says
+"split it" rather than pretending the scan was blank. Scans cap at 15 pages: one
+model call has to hold the whole transcript.
+
+### Use it from Claude (MCP)
+
+`npm run mcp -- you@example.com` starts a stdio MCP server with two tools:
+`list_documents` (with key terms) and `ask_lease`, which returns the same cited
+answer the web app gives. It drains the same `answerQuestion()` generator as the
+SSE route and the eval harness. Daily caps apply. In Claude Desktop's config:
+
+```json
+{
+  "mcpServers": {
+    "leaselens": {
+      "command": "npm",
+      "args": ["run", "--silent", "--prefix", "/path/to/leaselens", "mcp", "--", "you@example.com"]
+    }
+  }
+}
+```
+
+It runs as the named account, the same trust model as `npm run eval`: whoever
+can start it already holds `DATABASE_URL`. A remote server with per-user tokens
+is the upgrade if anyone else ever needs it.
 
 ---
 
@@ -127,11 +179,13 @@ model calls are faked. No Docker, no service container in CI.
 | Command | |
 | --- | --- |
 | `npm run dev` | the app |
-| `npm test` | 82 tests, ~10s, no external services |
+| `npm test` | 105 tests, ~10s, no external services |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run migrate` | apply `lib/db/schema.sql` |
-| `npm run seed` | create the demo account and ingest the fixtures |
-| `npm run eval` | the golden set → `eval/results.md` (free tier; takes a few minutes) |
+| `npm run seed` | create the demo account and ingest the fixtures (backfills key terms on old seeds) |
+| `npm run eval` | the golden set → `eval/results.md` (free tier; ten-plus minutes) |
+| `npm run calibrate` | top-1 cosine for lease vs off-topic questions → the off-topic threshold |
+| `npm run mcp -- <email>` | stdio MCP server for that account |
 
 ---
 
@@ -148,7 +202,10 @@ model calls are faked. No Docker, no service container in CI.
 4. **GitHub** → secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`
    (the last two are in `.vercel/project.json` after `npx vercel link`), plus
    `DATABASE_URL` / `GOOGLE_API_KEY` for the nightly eval.
-5. `npm run migrate && npm run seed` once against production.
+5. `npm run migrate && npm run seed` once against production, **and run
+   `npm run migrate` again before pushing any change to `schema.sql`.** CI
+   deploys code, not schema: code that selects a column the database doesn't
+   have yet fails every request that touches it.
 
 `vercel.json` sets `"deploymentEnabled": { "main": false }`. **Leave it that
 way.** Vercel's Git integration otherwise deploys on push before CI has run,
@@ -186,8 +243,10 @@ embeddings — goes through Google AI Studio. One key, no card on file, and the
 1,500-requests/day free tier on the Flash models comfortably covers a demo.
 `EMBED_DIM` (768) is pinned in two places — here and the `vector(768)` column —
 so a silent model or dimension change fails at INSERT rather than at retrieval.
-The trade-off is the free tier's 15-requests/minute rate limit, which is why
-the eval script runs slowly rather than in a burst.
+The trade-off is the free tier's rate limit (5 requests/minute on the answer
+model as of October 2026), which is why the eval script runs slowly rather than
+in a burst, and why a 429 gets one retry after the delay the API asks for, and
+only when that delay fits inside the request.
 
 **The PDF isn't stored.** Only extracted text and page numbers. Vercel's
 filesystem is ephemeral and blob storage is a whole extra service; the citation
@@ -196,8 +255,13 @@ give you.
 
 **`after()` for ingestion.** The upload response returns an id immediately and
 parsing continues past it, so the client polls instead of holding a request open
-for thirty seconds. It defers the work, not the 60-second cap — which is why
-`MAX_PAGES` is 60. Raising it needs a queue, not a bigger number.
+for thirty seconds. It defers the work, not the function's time cap (300s for
+uploads, the Hobby ceiling). Raising `MAX_PAGES` past 60 needs a queue, not a
+bigger number.
+
+**Uploads cap at 4 MB on Vercel, 8 MB locally.** Vercel rejects a body over
+4.5 MB before any handler runs, with an opaque `FUNCTION_PAYLOAD_TOO_LARGE`.
+Capping under it means the user reads LeaseLens' own message instead.
 
 ---
 
@@ -205,8 +269,9 @@ for thirty seconds. It defers the work, not the 60-second cap — which is why
 
 - **Independent scaling and independent deploys.** A CSS change now redeploys
   the API. At this size that's a feature; it's still a real difference.
-- **A 60-second wall on every request.** Ingestion caps at 60 pages. The split
-  version could run a ten-minute job.
+- **A wall on every request.** 60 seconds for a question, 300 for an upload.
+  Ingestion caps at 60 pages (15 for a scan). The split version could run a
+  ten-minute job.
 - **Python's document ecosystem.** `pypdf` + `pdfplumber` handle table-heavy
   PDFs better than pdf.js. Leases are mostly linear prose, so this rarely bites
   — but a lease with a rent-schedule table will chunk worse here.
@@ -215,15 +280,22 @@ for thirty seconds. It defers the work, not the 60-second cap — which is why
 
 ## Evaluation
 
-`npm run eval` runs 24 questions across the two synthetic fixture leases and
+`npm run eval` runs 27 questions across the two synthetic fixture leases and
 writes `eval/results.md`:
 
 - **Recall@5** — did the clause that decides the answer survive to the prompt?
-- **Refusal accuracy** — on the six questions the leases genuinely don't cover,
-  did it decline?
+- **Refusal accuracy** — on the nine questions the leases genuinely don't cover
+  (six lease topics they're silent on, three off-topic), did it decline?
 - **False refusals** — the failure mode refusal accuracy would otherwise hide.
 - **Citation validity** — every `[n]` resolves to a clause actually supplied.
 - **Groundedness** — LLM-as-judge: is every claim supported by a cited clause?
+- **Key-terms accuracy** — against `eval/key-terms.json`: right value, on a
+  page that really says it, and *nothing* for the fields a lease is silent on.
+  Garden Flat says the owner names the deposit scheme "within thirty days";
+  that is not a deposit-return window, and extracting it as one is a miss.
+
+A 503 or exhausted quota mid-run is retried, not scored as a wrong answer:
+otherwise the free tier's bad minutes become the pipeline's bad numbers.
 
 The fixtures are generated, never committed: `scripts/fixtures.ts` writes one
 lease with numbered clauses and one in continuous plain prose, which is where

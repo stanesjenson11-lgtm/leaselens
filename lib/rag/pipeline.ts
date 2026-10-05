@@ -2,7 +2,7 @@ import { genAI, ANSWER_MODEL, addUsage, withRetry, type Usage } from "../llm";
 import { ANSWER_SYSTEM, userTurn } from "./prompt";
 import { grade } from "./grade";
 import { rerank } from "./rerank";
-import { hybridSearch } from "./search";
+import { hybridSearch, OFF_TOPIC_THRESHOLD } from "./search";
 import { rewriteQuery } from "./rewrite";
 import { toCitations, type Citation, type Clause, type Span } from "./types";
 
@@ -17,6 +17,11 @@ export type PipelineEvent =
 
 const CANDIDATES = 25;
 const KEEP = 5;
+
+// Phrased like every other decline ("does not address") so the UI, the eval's
+// refusal metric and the user all read it the same way.
+export const OFF_TOPIC_REPLY =
+  "This lease does not address that. It doesn't look like a question about the lease, so I didn't search any further. Try asking about rent, the deposit, notice, repairs, or anything else the lease covers.";
 
 /**
  * rewrite → retrieve → rerank → grade → (retry once) → answer.
@@ -51,13 +56,18 @@ export async function* answerQuestion(opts: {
 
     // ---- 2. retrieve (both halves tenant-scoped in SQL)
     stop = clock();
-    let candidates: Clause[] = await hybridSearch(
-      opts.userId,
-      opts.documentId,
-      query,
-      CANDIDATES,
-    );
+    const found = await hybridSearch(opts.userId, opts.documentId, query, CANDIDATES);
+    let candidates: Clause[] = found.clauses;
     yield { type: "stage", ...stop("retrieve", `${candidates.length} candidates`) };
+
+    // ---- 2b. off-topic gate: nothing in the lease is even close, so rerank,
+    // grade and answer would spend three or four calls to say the same thing.
+    if (found.topScore < OFF_TOPIC_THRESHOLD) {
+      yield { type: "stage", ...clock()("gate", `off-topic, top score ${found.topScore.toFixed(3)}`) };
+      yield { type: "citations", citations: [] };
+      yield { type: "done", content: OFF_TOPIC_REPLY, citations: [], usage, spans };
+      return;
+    }
 
     // ---- 3. rerank
     stop = clock();
@@ -73,7 +83,7 @@ export async function* answerQuestion(opts: {
 
     if (!verdict.sufficient) {
       stop = clock();
-      const widened = await hybridSearch(
+      const { clauses: widened } = await hybridSearch(
         opts.userId,
         opts.documentId,
         verdict.searchFor,

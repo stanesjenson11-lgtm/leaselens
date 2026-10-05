@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { api, type Chat, type Citation, type Msg } from "@/lib/client";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { api, type Chat, type Citation, type Doc, type KeyTerm, type Msg } from "@/lib/client";
 import { AnswerText } from "./CitationChip";
 import { REFRESH } from "./Sidebar";
 
 const STAGE_LABEL: Record<string, string> = {
   rewrite: "reading the conversation",
   retrieve: "searching the lease",
+  gate: "checking the question is about the lease",
   rerank: "ranking clauses",
   grade: "checking the clauses answer it",
   retry: "widening the search",
@@ -30,11 +31,20 @@ export default function Conversation({ chatId }: { chatId: string }) {
   const [draft, setDraft] = useState("");
   const [citations, setCitations] = useState<Citation[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [terms, setTerms] = useState<KeyTerm[]>([]);
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void api<{ chat: Chat; messages: Msg[] }>(`/api/chats/${chatId}`)
-      .then((d) => setMessages(d.messages))
+      .then((d) => {
+        setMessages(d.messages);
+        // The card only shows on an empty chat, so only an empty chat fetches it.
+        // A failure here costs a nice-to-have, not the conversation.
+        if (d.chat.document_id && d.messages.length === 0)
+          void api<Doc>(`/api/documents/${d.chat.document_id}`)
+            .then((doc) => setTerms(doc.key_terms ?? []))
+            .catch(() => {});
+      })
       .catch((e) => setError(e.message));
   }, [chatId]);
 
@@ -132,6 +142,22 @@ export default function Conversation({ chatId }: { chatId: string }) {
               </svg>
             </div>
             <h1 className="font-serif text-2xl">What does your lease say?</h1>
+            {terms.length > 0 && (
+              <section aria-labelledby="glance" className="mt-6 rounded-2xl p-5 shadow-neu-sm">
+                <h2 id="glance" className="text-xs font-medium uppercase tracking-wide text-muted">
+                  At a glance
+                </h2>
+                <dl className="mt-3 grid grid-cols-[auto_1fr_auto] gap-x-4 gap-y-2 text-sm">
+                  {terms.map((t) => (
+                    <Fragment key={t.field}>
+                      <dt className="text-muted">{t.label}</dt>
+                      <dd>{t.value}</dd>
+                      <dd className="text-xs tabular-nums text-muted">p.{t.page}</dd>
+                    </Fragment>
+                  ))}
+                </dl>
+              </section>
+            )}
             <p className="mt-2 text-muted">Try one of these:</p>
             <ul className="mt-5 space-y-3">
               {SUGGESTIONS.map((s) => (

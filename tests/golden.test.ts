@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { chunkPages } from "@/lib/ingest/chunk";
 import { extractPages } from "@/lib/ingest/pdf";
+import { KEY_TERM_LABELS } from "@/lib/ingest/terms";
 import { GARDEN_FLAT, MAPLE_COURT, renderPdf } from "@/scripts/fixtures";
 
 /**
@@ -78,6 +79,10 @@ describe("the golden set", () => {
       "renters-insurance": /insurance/i,
       "flat-pets": /\bpet\b|\bcat\b|\bdog\b/i,
       "flat-parking": /parking/i,
+      // Off-topic entirely: what the off-topic gate exists to catch cheaply.
+      "off-topic-capital": /france|paris/i,
+      "off-topic-recipe": /biryani|recipe/i,
+      "off-topic-code": /python|function/i,
     };
 
     for (const [name, text] of [
@@ -88,6 +93,25 @@ describe("the golden set", () => {
         const pattern = forbidden[c.id];
         expect(pattern, `no forbidden-topic pattern declared for ${c.id}`).toBeDefined();
         expect(text, `${c.id} is supposed to be absent from ${name}`).not.toMatch(pattern);
+      }
+    }
+  });
+});
+
+describe("the key-terms expectations", () => {
+  // Same reasoning as the golden set: a typo here is a permanent false miss
+  // that no CI run would ever surface.
+  const expected: Record<string, Record<string, string | null>> = JSON.parse(
+    readFileSync(path.join(root, "eval/key-terms.json"), "utf8"),
+  );
+  const text = { "maple-court": MAPLE_COURT, "garden-flat": GARDEN_FLAT } as Record<string, string>;
+
+  it("name real fields and quote text the lease contains", () => {
+    for (const [doc, fields] of Object.entries(expected)) {
+      expect(text[doc], doc).toBeDefined();
+      for (const [field, want] of Object.entries(fields)) {
+        expect(Object.keys(KEY_TERM_LABELS), field).toContain(field);
+        if (want !== null) expect(text[doc].toLowerCase(), `${doc}.${field}`).toContain(want.toLowerCase());
       }
     }
   });

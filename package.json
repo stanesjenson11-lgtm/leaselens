@@ -11,10 +11,13 @@
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
-    "eval": "tsx scripts/evaluate.ts"
+    "eval": "tsx scripts/evaluate.ts",
+    "calibrate": "tsx scripts/calibrate.ts",
+    "mcp": "tsx scripts/mcp.ts"
   },
   "dependencies": {
     "@google/genai": "^2.18.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@neondatabase/serverless": "^1.0.0",
     "jose": "^6.0.0",
     "next": "^15.1.0",

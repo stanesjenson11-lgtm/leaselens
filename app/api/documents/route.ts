@@ -4,11 +4,13 @@ import { countDocuments, createDocument, listDocuments } from "@/lib/db/queries"
 import { ingest } from "@/lib/ingest";
 import { MAX_DOCS_PER_USER, validateUpload } from "@/lib/ingest/pdf";
 import { badRequest, json, route } from "@/lib/http";
+import { assertWithinDailyLimit } from "@/lib/limits";
 
 export const runtime = "nodejs";
-// Parse + chunk + embed has to finish inside one invocation. MAX_PAGES is set
-// against this number, not the other way round.
-export const maxDuration = 60;
+// Parse (or transcribe a scan) + chunk + embed + key terms has to finish inside
+// one invocation. 300s is the Vercel Hobby ceiling; a 15-page scan is the slow
+// path at well under a minute, so this is headroom, not a target.
+export const maxDuration = 300;
 
 export const GET = route(async (req: Request) => {
   const { userId } = await session(req);
@@ -20,6 +22,8 @@ export const POST = route(async (req: Request) => {
 
   if ((await countDocuments(userId)) >= MAX_DOCS_PER_USER)
     throw badRequest(`You can keep ${MAX_DOCS_PER_USER} documents. Delete one to upload another.`);
+  // Reading a scan and pulling key terms spend model tokens; same cap as questions.
+  await assertWithinDailyLimit(userId);
 
   const form = await req.formData();
   const file = form.get("file");

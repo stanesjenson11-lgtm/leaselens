@@ -7,6 +7,8 @@
  * Convention: every tenant-scoped function takes `userId` as its FIRST argument,
  * and that argument always comes from session() — never from a request.
  */
+import type { Chunk } from "../ingest/chunk";
+import type { KeyTerm } from "../ingest/terms";
 import { raw, tq, toVector, type Row } from "./client";
 
 // ---------------------------------------------------------------- users
@@ -47,13 +49,14 @@ export type Doc = {
   page_count: number | null;
   status: string;
   error: string | null;
+  key_terms: KeyTerm[] | null;
   created_at: string;
 };
 
 export async function createDocument(userId: string, filename: string) {
   const [d] = await tq<Doc>(
     `INSERT INTO documents (user_id, filename) VALUES ($1, $2)
-     RETURNING id, filename, page_count, status, error, created_at`,
+     RETURNING id, filename, page_count, status, error, key_terms, created_at`,
     [userId, filename],
   );
   return d;
@@ -61,7 +64,7 @@ export async function createDocument(userId: string, filename: string) {
 
 export async function listDocuments(userId: string) {
   return tq<Doc>(
-    `SELECT id, filename, page_count, status, error, created_at
+    `SELECT id, filename, page_count, status, error, key_terms, created_at
      FROM documents WHERE user_id = $1 ORDER BY created_at DESC`,
     [userId],
   );
@@ -69,7 +72,7 @@ export async function listDocuments(userId: string) {
 
 export async function getDocument(userId: string, id: string) {
   const [d] = await tq<Doc>(
-    `SELECT id, filename, page_count, status, error, created_at
+    `SELECT id, filename, page_count, status, error, key_terms, created_at
      FROM documents WHERE user_id = $1 AND id = $2`,
     [userId, id],
   );
@@ -88,15 +91,25 @@ export async function setDocumentStatus(
   userId: string,
   id: string,
   status: string,
-  extra: { pageCount?: number; error?: string } = {},
+  extra: { pageCount?: number; error?: string; keyTerms?: KeyTerm[] | null } = {},
 ) {
+  // Key terms land in the same statement as "ready", so the UI never sees a
+  // ready document whose terms are still on their way.
   await tq(
     `UPDATE documents
         SET status = $3,
             page_count = COALESCE($4, page_count),
-            error = $5
+            error = $5,
+            key_terms = COALESCE($6::jsonb, key_terms)
       WHERE user_id = $1 AND id = $2`,
-    [userId, id, status, extra.pageCount ?? null, extra.error ?? null],
+    [
+      userId,
+      id,
+      status,
+      extra.pageCount ?? null,
+      extra.error ?? null,
+      extra.keyTerms == null ? null : JSON.stringify(extra.keyTerms),
+    ],
   );
 }
 
@@ -157,6 +170,17 @@ export async function countChunks(userId: string, documentId: string) {
   return Number(r.n);
 }
 
+/** A document's chunks in reading order, shaped as chunkPages() produced them. */
+export async function listChunks(userId: string, documentId: string) {
+  return tq<Chunk>(
+    `SELECT ordinal, heading_path AS "headingPath", page_start AS "pageStart",
+            page_end AS "pageEnd", content
+       FROM chunks WHERE user_id = $1 AND document_id = $2
+      ORDER BY ordinal`,
+    [userId, documentId],
+  );
+}
+
 /** Dense half of the hybrid: cosine distance over the HNSW index. */
 export async function denseSearch(
   userId: string,
@@ -164,8 +188,9 @@ export async function denseSearch(
   embedding: number[],
   limit: number,
 ) {
-  return tq<Retrieved>(
-    `SELECT id::text AS id, content, heading_path, page_start, page_end
+  return tq<Retrieved & { score: number }>(
+    `SELECT id::text AS id, content, heading_path, page_start, page_end,
+            1 - (embedding <=> $3::vector) AS score
        FROM chunks
       WHERE user_id = $1 AND document_id = $2
       ORDER BY embedding <=> $3::vector

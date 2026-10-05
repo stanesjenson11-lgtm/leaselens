@@ -20,16 +20,44 @@ export function setGenAI(c: GoogleGenAI | undefined): void {
 
 /**
  * Gemini's free tier returns 503 UNAVAILABLE under load; it's transient, not
- * our bug. Retry with backoff on 503 only — anything else (400, 429 quota,
- * auth) fails immediately since a retry won't fix it.
+ * our bug, so retry it with backoff.
+ *
+ * 429 gets exactly one retry, after the delay the API itself asks for. One
+ * question spends four or five calls, and the free tier allows 5 requests a
+ * minute on the answer model, so two questions in quick succession trip it
+ * and a short pause beats an error.
+ * If the API wants longer than the cap, the wait would outlast a chat request,
+ * so it throws at once. The eval script isn't racing a 60s function and can
+ * wait out a whole per-minute window, so it raises RETRY_429_MAX_S.
+ * Anything else (400, auth) fails immediately since a retry won't fix it.
  */
+const max429 = () => Number(process.env.RETRY_429_MAX_S) || 15;
+
+export function retryDelayMs(err: unknown): number | null {
+  // The SDK nests the API's JSON inside its own message, so the quotes arrive
+  // escaped (\"retryDelay\": \"52s\"). \W+ matches both that and plain JSON.
+  const m = /retryDelay\W+(\d+(?:\.\d+)?)s/.exec(String((err as Error)?.message ?? ""));
+  const s = m ? Number(m[1]) : 5;
+  return s <= max429() ? Math.ceil(s * 1000) + 250 : null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
+  let retried429 = false;
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if ((err as { status?: number })?.status !== 503 || attempt === tries) throw err;
-      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+      const status = (err as { status?: number })?.status;
+      const wait = status === 429 && !retried429 ? retryDelayMs(err) : null;
+      if (wait !== null) {
+        retried429 = true;
+        await sleep(wait);
+        continue;
+      }
+      if (status !== 503 || attempt >= tries) throw err;
+      await sleep(500 * 2 ** attempt);
     }
   }
 }

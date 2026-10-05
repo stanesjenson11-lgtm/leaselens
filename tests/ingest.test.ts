@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { chunkPages } from "@/lib/ingest/chunk";
-import { extractPages, validateUpload } from "@/lib/ingest/pdf";
+import { MAX_SCANNED_PAGES, extractPages, validateUpload } from "@/lib/ingest/pdf";
+import { setGenAI } from "@/lib/llm";
 import { MAPLE_COURT, renderPdf } from "@/scripts/fixtures";
 
 /**
@@ -26,15 +27,6 @@ describe("upload validation", () => {
 
   it("accepts a real PDF", () => {
     expect(() => validateUpload(pdf, "lease.pdf")).not.toThrow();
-  });
-
-  it("rejects a scan — pages with no text layer", async () => {
-    // Blank pages are what a scanned lease looks like to a text extractor.
-    // Embedding them would build an index that retrieves nothing, silently.
-    const blank = await PDFDocument.create();
-    for (let i = 0; i < 3; i++) blank.addPage([595, 842]);
-
-    await expect(extractPages(await blank.save())).rejects.toThrow(/scan/i);
   });
 });
 
@@ -94,5 +86,72 @@ describe("a real lease PDF, end to end", () => {
     const chunks = chunkPages(pages);
     const covered = new Set(chunks.map((c) => c.pageStart));
     for (const page of pages) expect(covered.has(page.number)).toBe(true);
+  });
+});
+
+describe("a scanned lease — pages with no text layer", () => {
+  // Blank pages are what a scan looks like to a text extractor.
+  const scan = async (pages: number) => {
+    const doc = await PDFDocument.create();
+    for (let i = 0; i < pages; i++) doc.addPage([595, 842]);
+    return doc.save();
+  };
+
+  let calls = 0;
+  const transcriber = (text: string, finishReason = "STOP") =>
+    setGenAI({
+      models: {
+        generateContent: async () => {
+          calls++;
+          return {
+            text,
+            candidates: [{ finishReason }],
+            usageMetadata: { promptTokenCount: 900, candidatesTokenCount: 300 },
+          };
+        },
+      },
+    } as any);
+
+  afterEach(() => {
+    setGenAI(undefined);
+    calls = 0;
+  });
+
+  it("is transcribed by the model, keeping real page numbers, and chunks like any lease", async () => {
+    const [first, second] = [MAPLE_COURT.slice(0, 1500), MAPLE_COURT.slice(1500, 3000)];
+    // Out of order, one page split across two entries, one out of range:
+    // all things the parser has to survive, not trust.
+    transcriber(
+      JSON.stringify([
+        { page: 2, text: second },
+        { page: 1, text: first.slice(0, 700) },
+        { page: 1, text: first.slice(700) },
+        { page: 9, text: "hallucinated page" },
+      ]),
+    );
+    let usage = { in: 0, out: 0 };
+    const pages = await extractPages(await scan(2), (u) => (usage = u));
+
+    expect(pages.map((p) => p.number)).toEqual([1, 2]);
+    expect(pages[0].text).toContain("MAPLE COURT");
+    expect(pages.some((p) => p.text.includes("hallucinated"))).toBe(false);
+    expect(usage).toEqual({ in: 900, out: 300 });
+    expect(chunkPages(pages).length).toBeGreaterThan(2);
+  });
+
+  it("says to split it when the transcript is cut off", async () => {
+    transcriber('[{"page": 1, "text": "MAPLE COURT', "MAX_TOKENS");
+    await expect(extractPages(await scan(2))).rejects.toThrow(/split/i);
+  });
+
+  it("still rejects a scan the model can't read", async () => {
+    transcriber(JSON.stringify([{ page: 1, text: "" }, { page: 2, text: "Page 2" }]));
+    await expect(extractPages(await scan(2))).rejects.toThrow(/scan/i);
+  });
+
+  it("rejects an over-long scan before spending a model call on it", async () => {
+    transcriber("[]");
+    await expect(extractPages(await scan(MAX_SCANNED_PAGES + 1))).rejects.toThrow(/limited/);
+    expect(calls).toBe(0);
   });
 });

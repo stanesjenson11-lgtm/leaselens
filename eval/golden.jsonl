@@ -22,3 +22,6 @@
 {"id":"flat-airbnb","document":"garden-flat","answerable":true,"evidence":"short term letting platform","question":"Can I put the flat on Airbnb while I am away?"}
 {"id":"flat-pets","document":"garden-flat","answerable":false,"evidence":null,"question":"Can I keep a cat in the flat?"}
 {"id":"flat-parking","document":"garden-flat","answerable":false,"evidence":null,"question":"Is there a parking permit included with the flat?"}
+{"id":"off-topic-capital","document":"maple-court","answerable":false,"evidence":null,"question":"What is the capital of France?"}
+{"id":"off-topic-recipe","document":"maple-court","answerable":false,"evidence":null,"question":"Give me a recipe for chicken biryani."}
+{"id":"off-topic-code","document":"garden-flat","answerable":false,"evidence":null,"question":"Write a Python function that reverses a string."}

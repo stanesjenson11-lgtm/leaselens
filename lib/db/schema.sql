@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS documents (
 
 -- user_id is denormalized onto chunks and messages on purpose: every scoped
 -- query becomes a single-table filter with no join to get wrong.
+-- Added after launch, so ALTER rather than in the CREATE: an existing database
+-- gets the column on its next migrate. Null means extraction failed or never
+-- ran; an empty array means it ran and nothing survived grounding.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS key_terms jsonb;
+
 CREATE TABLE IF NOT EXISTS chunks (
   id           bigserial PRIMARY KEY,
   document_id  uuid NOT NULL REFERENCES documents ON DELETE CASCADE,

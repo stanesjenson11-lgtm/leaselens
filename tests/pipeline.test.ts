@@ -3,10 +3,17 @@ import type { PGlite } from "@electric-sql/pglite";
 import { EMBED_DIM } from "@/lib/rag/embed";
 
 // Google is the only thing in the retrieval path that leaves the process.
+// Every query points straight at the deposit clause (the direction of
+// fakeEmbedding(1), cosine 1) so it clears the off-topic gate on purpose; an
+// off-topic question gets a vector orthogonal-ish to every clause.
 vi.mock("@/lib/rag/embed", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/rag/embed")>()),
   embed: async (texts: string[]) =>
-    texts.map(() => Array.from({ length: EMBED_DIM }, (_, i) => Math.sin(i * 0.017))),
+    texts.map((t) =>
+      Array.from({ length: EMBED_DIM }, (_, i) =>
+        /capital of France/.test(t) ? (i % 2 ? -1 : 1) : Math.sin(7.3 + i * 0.017),
+      ),
+    ),
 }));
 
 const { setGenAI } = await import("@/lib/llm");
@@ -185,6 +192,27 @@ describe("the pipeline", () => {
     // frames, and an exception mid-stream reaches the browser as a dead socket.
     expect(events.at(-1).type).toBe("error");
     expect(events.at(-1).message).toMatch(/try sending it again/i);
+  });
+
+  it("declines an off-topic question without a single model call", async () => {
+    let calls = 0;
+    const fake = fakeGemini();
+    setGenAI({
+      models: {
+        generateContent: async (req: any) => (calls++, fake.models.generateContent(req)),
+        generateContentStream: async () => (calls++, fake.models.generateContentStream()),
+      },
+    } as any);
+
+    const events = await run("What is the capital of France?");
+    const done = events.at(-1);
+
+    expect(done.type).toBe("done");
+    expect(done.content).toMatch(/does not address/);
+    expect(done.citations).toEqual([]);
+    expect(done.spans.map((s: any) => s.stage)).toEqual(["rewrite", "retrieve", "gate"]);
+    // First message: no rewrite call, and the gate stops rerank, grade, answer.
+    expect(calls).toBe(0);
   });
 
   it("records a span for every stage it ran", async () => {

@@ -4,8 +4,16 @@ import "./env";
 import { required } from "./env";
 import { hashPassword } from "@/lib/auth/password";
 import { applySchema } from "@/lib/db/migrate";
-import { createDocument, createUser, findUserByEmail, listDocuments } from "@/lib/db/queries";
+import {
+  createDocument,
+  createUser,
+  findUserByEmail,
+  listChunks,
+  listDocuments,
+  setDocumentStatus,
+} from "@/lib/db/queries";
 import { ingest } from "@/lib/ingest";
+import { extractKeyTerms } from "@/lib/ingest/terms";
 import { writeFixtures } from "./fixtures";
 
 /**
@@ -27,12 +35,19 @@ const user =
 console.log(`user ${user.email}`);
 
 const fixtures = await writeFixtures(path.join(process.cwd(), "eval/fixtures"));
-const existing = new Set((await listDocuments(user.id)).map((d) => d.filename));
+const existing = new Map((await listDocuments(user.id)).map((d) => [d.filename, d]));
 
 for (const [name, file] of Object.entries(fixtures)) {
   const filename = `${name}.pdf`;
-  if (existing.has(filename)) {
-    console.log(`${filename} — already seeded, skipping`);
+  const seeded = existing.get(filename);
+  if (seeded) {
+    // Seeded before key terms existed: fill them in from the stored chunks
+    // rather than re-ingesting, which would orphan the demo account's chats.
+    if (seeded.status === "ready" && seeded.key_terms == null) {
+      const { terms } = await extractKeyTerms(await listChunks(user.id, seeded.id));
+      await setDocumentStatus(user.id, seeded.id, "ready", { keyTerms: terms });
+      console.log(`${filename} — already seeded, backfilled ${terms.length} key terms`);
+    } else console.log(`${filename} — already seeded, skipping`);
     continue;
   }
 

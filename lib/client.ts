@@ -29,7 +29,10 @@ export type Doc = {
   page_count: number | null;
   status: string;
   error: string | null;
+  key_terms?: KeyTerm[] | null;
 };
+
+export type KeyTerm = { field: string; label: string; value: string; page: number };
 
 export type Chat = { id: string; document_id: string | null; title: string | null };
 
