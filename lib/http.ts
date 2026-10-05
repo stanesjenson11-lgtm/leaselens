@@ -23,15 +23,39 @@ export const notFound = (m = "Not found.") => new HttpError(404, m);
 export const json = (data: unknown, status = 200) =>
   Response.json(data as any, { status });
 
-/** Wraps a route handler so a thrown HttpError becomes its response. */
+/**
+ * Wraps a route handler so a thrown HttpError becomes its response — and so
+ * every response carries a cache directive.
+ *
+ * The third tenancy failure mode, after "wrong SQL" and "wrong session": the
+ * right bytes, stored and replayed to the wrong person. Every response from
+ * this API is tenant-specific, and none of them carried Cache-Control, so a
+ * browser was free to apply heuristic freshness to /api/chats and hand the
+ * previous account's conversation list to the next one on a shared machine.
+ * No `Vary: Cookie` either, so a shared proxy would do the same across users.
+ *
+ * Set here rather than in json(), because login/register build their own
+ * Response to attach Set-Cookie and the SSE route returns a stream — all of
+ * them come back through this wrapper, and only this wrapper.
+ */
 export function route<A extends unknown[]>(fn: (...args: A) => Promise<Response>) {
   return async (...args: A): Promise<Response> => {
+    let res: Response;
     try {
-      return await fn(...args);
+      res = await fn(...args);
     } catch (e) {
-      if (e instanceof HttpError) return json({ error: e.message }, e.status);
-      console.error(e);
-      return json({ error: "Something went wrong." }, 500);
+      if (e instanceof HttpError) res = json({ error: e.message }, e.status);
+      else {
+        console.error(e);
+        res = json({ error: "Something went wrong." }, 500);
+      }
     }
+    // no-transform too: the SSE route sets it so proxies stream rather than
+    // buffer, and overwriting it here would undo that. Harmless on JSON.
+    res.headers.set("cache-control", "private, no-store, no-transform");
+    // Belt and braces: no-store already forbids reuse, but a cache that
+    // ignores it still must not key one user's response for another.
+    res.headers.set("vary", [res.headers.get("vary"), "Cookie"].filter(Boolean).join(", "));
+    return res;
   };
 }

@@ -228,6 +228,43 @@ export async function getChat(userId: string, id: string) {
   return c;
 }
 
+/** messages cascade on the chats FK, so one statement is the whole delete.
+ *  Returns false when the id belongs to someone else — same shape as
+ *  deleteDocument, so the route answers 404 either way. */
+export async function deleteChat(userId: string, id: string) {
+  const rows = await tq<{ id: string }>(
+    `DELETE FROM chats WHERE user_id = $1 AND id = $2 RETURNING id`,
+    [userId, id],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Clears out this user's chats that were opened and never asked anything.
+ *
+ * Clicking a document creates the chat row up front, so backing out without
+ * typing leaves an untitled husk in the sidebar forever — titles only get
+ * generated from the first question. Swept at the moment the next chat is
+ * created, which is exactly when a new husk would otherwise be added.
+ *
+ * NOT EXISTS rather than `id NOT IN (SELECT chat_id ...)`: chat_id is NOT NULL
+ * today, but NOT IN silently matches nothing the day a NULL appears in that
+ * column, and a delete that quietly stops working is the worst kind.
+ */
+export async function deleteEmptyChats(userId: string) {
+  const rows = await tq<{ id: string }>(
+    `DELETE FROM chats
+      WHERE user_id = $1
+        AND NOT EXISTS (
+              SELECT 1 FROM messages
+               WHERE messages.chat_id = chats.id AND messages.user_id = $1
+            )
+     RETURNING id`,
+    [userId],
+  );
+  return rows.length;
+}
+
 export async function setChatTitle(userId: string, id: string, title: string) {
   await tq(`UPDATE chats SET title = $3 WHERE user_id = $1 AND id = $2`, [userId, id, title]);
 }

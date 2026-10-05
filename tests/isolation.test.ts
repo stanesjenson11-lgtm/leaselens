@@ -4,7 +4,7 @@ import { POST as register } from "@/app/api/auth/register/route";
 import { GET as listDocs, POST as uploadDoc } from "@/app/api/documents/route";
 import { GET as getDoc, DELETE as deleteDoc } from "@/app/api/documents/[id]/route";
 import { GET as listChats, POST as newChat } from "@/app/api/chats/route";
-import { GET as getChatRoute } from "@/app/api/chats/[id]/route";
+import { GET as getChatRoute, DELETE as deleteChatRoute } from "@/app/api/chats/[id]/route";
 import { POST as ask } from "@/app/api/chats/[id]/messages/route";
 import { GET as admin } from "@/app/api/admin/route";
 import {
@@ -136,6 +136,17 @@ describe("user B, holding user A's ids", () => {
     expect((await listMessages(A.id, A.chatId)).length).toBe(1);
   });
 
+  it("cannot delete A's chat", async () => {
+    const res = await deleteChatRoute(get(`/api/chats/${A.chatId}`, B.cookie), ctx(A.chatId));
+    expect(res.status).toBe(404);
+
+    // A's conversation and its messages survived the attempt intact.
+    expect((await getChatRoute(get(`/api/chats/${A.chatId}`, A.cookie), ctx(A.chatId))).status).toBe(
+      200,
+    );
+    expect((await listMessages(A.id, A.chatId)).length).toBe(1);
+  });
+
   it("cannot open a chat against A's document", async () => {
     // The one place a document id legitimately arrives in a request body. It is
     // checked against B's tenant before it is ever stored on a chat row.
@@ -176,5 +187,83 @@ describe("a well-formed id that belongs to nobody", () => {
 
     expect(missing.status).toBe(theirs.status);
     expect(await missing.json()).toEqual(await theirs.json());
+  });
+});
+
+/**
+ * The failure mode the SQL tests cannot see: correct rows, correct session,
+ * and then the response gets stored and replayed to whoever sits down next.
+ * Every one of these responses is tenant-specific, so none of them may be
+ * cacheable — and a cache that ignores that must still key on the cookie.
+ */
+describe("every response", () => {
+  it("forbids caching and varies on the cookie", async () => {
+    const responses = [
+      await listDocs(get("/api/documents", A.cookie)),
+      await listChats(get("/api/chats", A.cookie)),
+      await getChatRoute(get(`/api/chats/${A.chatId}`, A.cookie), ctx(A.chatId)),
+      await admin(get("/api/admin", A.cookie)),
+      // The 401 too: a stored "Not signed in." is a smaller problem than a
+      // stored lease, but a stored 200 is the same code path.
+      await listChats(get("/api/chats")),
+    ];
+
+    for (const res of responses) {
+      expect(res.headers.get("cache-control")).toContain("no-store");
+      expect(res.headers.get("vary")).toContain("Cookie");
+    }
+  });
+});
+
+describe("a user deleting their own chat", () => {
+  it("removes it, its messages, and 404s the second time", async () => {
+    const doomed = await createChat(B.id, B.docId, "throwaway");
+    await insertMessage(B.id, doomed.id, "user", "delete me");
+
+    const res = await deleteChatRoute(get(`/api/chats/${doomed.id}`, B.cookie), ctx(doomed.id));
+    expect(res.status).toBe(200);
+
+    expect(await listMessages(B.id, doomed.id)).toEqual([]);
+    const gone = await getChatRoute(get(`/api/chats/${doomed.id}`, B.cookie), ctx(doomed.id));
+    expect(gone.status).toBe(404);
+
+    // And the delete stayed inside B's tenant — A is untouched.
+    expect((await listMessages(A.id, A.chatId)).length).toBe(1);
+  });
+});
+
+describe("opening a new chat", () => {
+  it("sweeps the caller's never-used chats, and reaches no further", async () => {
+    const empty1 = await createChat(B.id, B.docId, null);
+    const empty2 = await createChat(B.id, B.docId, null);
+
+    // One that was actually used, to prove the sweep is "no messages" and not
+    // "no title" — a chat can be asked a question before its title lands.
+    const used = await createChat(B.id, B.docId, null);
+    await insertMessage(B.id, used.id, "user", "a real question");
+
+    // A has an empty chat too. The sweep is a DELETE, so if it were unscoped
+    // this is where that shows up.
+    const aEmpty = await createChat(A.id, A.docId, null);
+
+    const res = await newChat(post("/api/chats", { documentId: B.docId }, B.cookie));
+    expect(res.status).toBe(201);
+    const fresh = (await res.json()) as { id: string };
+
+    const mine = ((await (await listChats(get("/api/chats", B.cookie))).json()) as {
+      id: string;
+    }[]).map((c) => c.id);
+
+    expect(mine).not.toContain(empty1.id);
+    expect(mine).not.toContain(empty2.id);
+    // The used one survives — and so does the chat just handed back, which was
+    // created after the sweep and is empty by definition.
+    expect(mine).toContain(used.id);
+    expect(mine).toContain(fresh.id);
+
+    const theirs = ((await (await listChats(get("/api/chats", A.cookie))).json()) as {
+      id: string;
+    }[]).map((c) => c.id);
+    expect(theirs).toContain(aEmpty.id);
   });
 });

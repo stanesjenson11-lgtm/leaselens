@@ -35,5 +35,11 @@ export async function middleware(req: NextRequest) {
   if (signedIn && (path === "/login" || path === "/register"))
     return NextResponse.redirect(new URL("/chat", req.url));
 
-  return NextResponse.next();
+  const res = NextResponse.next();
+  // Signed-in screens must not survive a sign-out. Without no-store the back
+  // button restores the previous account's chat from the bfcache — fully
+  // rendered, from memory, without a request the server could refuse.
+  if (path.startsWith("/chat") || path === "/admin")
+    res.headers.set("cache-control", "private, no-store");
+  return res;
 }

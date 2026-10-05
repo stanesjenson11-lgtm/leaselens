@@ -1,5 +1,5 @@
 import { session } from "@/lib/auth/session";
-import { getChat, listMessages } from "@/lib/db/queries";
+import { deleteChat, getChat, listMessages } from "@/lib/db/queries";
 import { json, notFound, route } from "@/lib/http";
 
 export const runtime = "nodejs";
@@ -14,4 +14,11 @@ export const GET = route(async (req: Request, ctx: Ctx) => {
   if (!chat) throw notFound();
 
   return json({ chat, messages: await listMessages(userId, id) });
+});
+
+export const DELETE = route(async (req: Request, ctx: Ctx) => {
+  const { userId } = await session(req);
+  const { id } = await ctx.params;
+  if (!(await deleteChat(userId, id))) throw notFound();
+  return json({ ok: true });
 });

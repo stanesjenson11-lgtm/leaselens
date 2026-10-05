@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { session } from "@/lib/auth/session";
-import { createChat, getDocument, listChats } from "@/lib/db/queries";
+import { createChat, deleteEmptyChats, getDocument, listChats } from "@/lib/db/queries";
 import { badRequest, json, notFound, route } from "@/lib/http";
 
 export const runtime = "nodejs";
@@ -24,6 +24,10 @@ export const POST = route(async (req: Request) => {
   const doc = await getDocument(userId, parsed.data.documentId);
   if (!doc) throw notFound();
   if (doc.status !== "ready") throw badRequest("That document is still being processed.");
+
+  // Before adding one more, drop the ones that were never used. Ordered before
+  // createChat so the chat we are about to hand back is never a candidate.
+  await deleteEmptyChats(userId);
 
   return json(await createChat(userId, doc.id, null), 201);
 });
