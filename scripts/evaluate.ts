@@ -104,6 +104,15 @@ type Result = Case & {
 
 const results: Result[] = [];
 
+// An outage scored as a wrong answer is a fake number. Any call that never
+// reached the model voids the run, and the last good results.md stays.
+let unreached = 0;
+const abortIfUnreached = () => {
+  if (!unreached) return;
+  console.error(`\n${unreached} call(s) never reached the model; eval/results.md left untouched.`);
+  process.exit(1);
+};
+
 for (const c of cases) {
   const doc = byName.get(c.document);
   if (!doc) throw new Error(`Document ${c.document} is not seeded for ${EMAIL}`);
@@ -152,12 +161,12 @@ for (const c of cases) {
     ms: Date.now() - started,
   };
 
-  // A judge that still can't be reached after its retries scores the case
-  // ungrounded rather than throwing away every result gathered so far.
+  if (answer.startsWith("[pipeline error]")) unreached++;
   result.grounded = answer.startsWith("[pipeline error]")
     ? false
     : await judge(c.question, answer, citations).catch((e) => {
         console.error(`  judge unreachable for ${c.id}:`, (e as Error).message.slice(0, 120));
+        unreached++;
         return false;
       });
 
@@ -166,6 +175,8 @@ for (const c of cases) {
     `${result.recalled || !c.answerable ? "." : "R"}${result.refused === !c.answerable ? "." : "F"}${result.grounded ? "." : "G"} ${c.id}`,
   );
 }
+
+abortIfUnreached();
 
 // ---------------------------------------------------------------------------
 // Key terms, extracted fresh from the stored chunks: this measures the current
@@ -185,7 +196,7 @@ for (const [name, fields] of Object.entries(expectedTerms)) {
   const chunks = await listChunks(user.id, doc.id);
   const terms = await extractKeyTerms(chunks).then(
     (r) => r.terms,
-    (e) => (console.error(`  key terms failed for ${name}:`, (e as Error).message.slice(0, 120)), []),
+    (e) => (console.error(`  key terms failed for ${name}:`, (e as Error).message.slice(0, 120)), unreached++, []),
   );
 
   for (const [field, want] of Object.entries(fields)) {
@@ -206,6 +217,8 @@ for (const [name, fields] of Object.entries(expectedTerms)) {
       );
   }
 }
+
+abortIfUnreached();
 
 // ---------------------------------------------------------------------------
 
